@@ -24,6 +24,8 @@
 #include "owler/owler.h"
 #include "argparser.h"
 
+#include "daemon.h"
+
 int main(int argc, char *argv[]) {
   std::string program_name(argv[0]);
   std::string subprogram("");

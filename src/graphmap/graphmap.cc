@@ -27,6 +27,85 @@ GraphMap::~GraphMap() {
   indexes_.clear();
 }
 
+void GraphMap::Initialize(ProgramParameters& parameters) {
+  clock_t time_start = clock();
+  clock_t last_time = time_start;
+
+  // Set the verbose level for the execution of this program.
+  LogSystem::GetInstance().SetProgramVerboseLevelFromInt(parameters.verbose_level);
+
+  // Check if the index exists, and build it if it doesn't.
+  BuildIndex(parameters);
+  LogSystem::GetInstance().Log(VERBOSE_LEVEL_HIGH | VERBOSE_LEVEL_MED, true, FormatString("Memory consumption: %s\n\n", FormatMemoryConsumptionAsString().c_str()), "Index");
+  last_time = clock();
+
+  if (parameters.calc_only_index == true) {
+    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("Finished generating index. Note: only index was generated due to selected program arguments.\n\n", FormatMemoryConsumptionAsString().c_str()), "Index");
+    return;
+  }
+
+  // Dynamic calculation of the number of allowed regions. This should be relative to the genome size.
+  // The following formula has been chosen arbitrarily.
+  // The dynamic calculation can be overridden by explicitly stating the max_num_regions in the arguments passed to the binary.
+  if (parameters.max_num_regions == 0) {
+    if (this->indexes_[0]->get_data_length_forward() < 5000000){
+      parameters.max_num_regions = 500;          // Limit the number of allowed regions, because log10 will drop rapidly after this point.
+    } else {
+      float M10 = 1000;                          // Baseline number of allowed regions. M10 is the number of allowed regions for 10Mbp reference size.
+      float factor = log10(((float) this->indexes_[0]->get_data_length()) / 1000000.0f);     // How many powers of 10 above 1 million?
+      parameters.max_num_regions = (int64_t) (M10 * factor);
+    }
+    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("Automatically setting the maximum allowed number of regions: max. %ld, attempt to reduce after %ld\n", parameters.max_num_regions, parameters.max_num_regions_cutoff), "Run");
+
+  } else if (parameters.max_num_regions < 0) {
+    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("No limit to the maximum allowed number of regions will be set.\n"), "Run");
+  }
+
+  // The dynamic calculation can be overridden by explicitly stating the max_num_regions_cutoff in the arguments passed to the binary.
+  if (parameters.max_num_regions_cutoff == 0) {
+    parameters.max_num_regions_cutoff = (parameters.max_num_regions < 0) ? (parameters.max_num_regions) : (parameters.max_num_regions / 5);
+  }
+
+  // Dynamic calculation of the number of allowed kmer hits for region selection.
+  // The following formula has been chosen arbitrarily.
+  // The correct value would be the one that calculates the mean (or median) of the kspectra and its standard deviation
+  // to detect outliers, but calculating the kspectra could be time and memory consuming for larger genomes. That is why
+  // we employ this simple heuristic.
+  // The dynamic calculation can be overridden by explicitly stating the max_num_hits in the arguments passed to the binary.
+  if (parameters.max_num_hits < 0) {
+    // This is how it was done previously.
+//    int64_t num_kmers = (1 << (parameters.k_region * 2));
+//    int64_t num_kmers_in_genome = (this->indexes_[0]->get_data_length_forward() * 2) - parameters.k_region + 1;
+//    double average_num_kmers = ((double) num_kmers_in_genome) / ((double) num_kmers);
+//    parameters.max_num_hits = (int64_t) ceil(average_num_kmers) * 500;
+    int64_t max_seed_count = 0;
+//    ((IndexSpacedHashFast *) this->indexes_[0])->CalcPercentileHits(0.9999, &parameters.max_num_hits, &max_seed_count);
+    ((IndexSpacedHashFast *) this->indexes_[0])->CalcPercentileHits(0.9999, &parameters.max_num_hits, &max_seed_count);
+    LOG_ALL("Automatically setting the maximum number of seed hits to: %ld. Maximum seed occurrence in index: %ld.\n", parameters.max_num_hits, max_seed_count);
+
+//    LogSystem::GetInstance().VerboseLog(VERBOSE_LEVEL_ALL, true, FormatString("Automatically setting the maximum number of kmer hits: %ld\n", parameters.max_num_hits), "Run");
+//    ErrorReporting::GetInstance().VerboseLog(VERBOSE_LEVEL_ALL, true, FormatString("\tmax_num_hits = %ld\n", parameters.max_num_hits), "Run");
+  } else if (parameters.max_num_hits == 0) {
+    LOG_ALL("No limit to the maximum number of seed hits will be set in region selection.\n");
+  }
+
+  if (parameters.is_reference_circular == false)
+    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("Reference genome is assumed to be linear.\n"), "Run");
+  else
+    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("Reference genome is assumed to be circular.\n"), "Run");
+
+  if (parameters.output_multiple_alignments == false)
+    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("Only one alignment will be reported per mapped read.\n"), "Run");
+  else
+    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("One or more similarly good alignments will be output per mapped read. Will be marked secondary.\n"), "Run");
+
+  if (parameters.outfmt != "sam" &&
+      parameters.outfmt != "afg" &&
+      parameters.outfmt != "m5" &&
+      parameters.outfmt != "mhap") {
+    LogSystem::GetInstance().Error(SEVERITY_INT_WARNING, __FUNCTION__, LogSystem::GetInstance().GenerateErrorMessage(ERR_WRONG_FILE_TYPE, "Unknown output format specified: '%s'. Defaulting to SAM output.", parameters.outfmt.c_str()));
+  }
+}
 
 void GraphMap::Run(ProgramParameters& parameters) {
   clock_t time_start = clock();

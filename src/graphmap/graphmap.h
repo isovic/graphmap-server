@@ -40,6 +40,9 @@ class GraphMap {
   // Main function for running the mapping process. It generates/loads the index, and handles batch loading of sequences from the reads file.
   void Run(ProgramParameters &parameters);
 
+  // Sets up the index and everything for mapping, but does not run the mapping process.
+  void Initialize(ProgramParameters &parameters);
+
   // Generates or loads the index of the reference genome.
   int BuildIndex(ProgramParameters &parameters);
 
