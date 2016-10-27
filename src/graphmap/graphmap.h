@@ -40,17 +40,21 @@ class GraphMap {
   // Main function for running the mapping process. It generates/loads the index, and handles batch loading of sequences from the reads file.
   void Run(ProgramParameters &parameters);
 
+  void CheckParameters(const ProgramParameters& parameters);
+
   // Sets up the index and everything for mapping, but does not run the mapping process.
-  void Initialize(ProgramParameters &parameters);
+  void Initialize(ProgramParameters &parameters, const clock_t &time_start);
+
+  void RunOnFile(const ProgramParameters &parameters, std::string reads_file, std::string out_sam_path, const clock_t &time_start);
 
   // Generates or loads the index of the reference genome.
   int BuildIndex(ProgramParameters &parameters);
 
   // Loads reads from a file in batches of given size (in MiB), or all at once.
-  void ProcessReadsFromSingleFile(ProgramParameters &parameters, FILE *fp_out);
+  void ProcessReadsFromSingleFile(const ProgramParameters &parameters, FILE *fp_out);
 
   // Process the loaded batch of reads. Uses OpenMP to do it in parallel. Calls ProcessOneRead for each read in the SequenceFile.
-  int ProcessSequenceFileInParallel(ProgramParameters *parameters, SequenceFile *reads, clock_t *last_time, FILE *fp_out, int64_t *ret_num_mapped, int64_t *ret_num_unmapped);
+  int ProcessSequenceFileInParallel(const ProgramParameters *parameters, SequenceFile *reads, clock_t *last_time, FILE *fp_out, int64_t *ret_num_mapped, int64_t *ret_num_unmapped);
 
   // Processes a single read from the batch of loaded reads.
   int ProcessRead(MappingData *mapping_data, const std::vector<Index *> indexes, const SingleSequence *read, const ProgramParameters *parameters, const EValueParams *evalue_params);
@@ -73,7 +77,7 @@ class GraphMap {
   // Opens the output SAM file for writing if the path is specified. If the path is empty, then output is set to STDOUT.
   FILE* OpenOutSAMFile_(std::string out_sam_path="");
   // Formats the SAM header from a given index.
-  std::string GenerateSAMHeader_(ProgramParameters &parameters, Index *index);
+  std::string GenerateSAMHeader_(const ProgramParameters &parameters, Index *index);
   // Generates a default SAM line for unmapped reads.
   std::string GenerateUnmappedSamLine_(MappingData *mapping_data, int64_t verbose_sam_output, const SingleSequence *read) const;
 

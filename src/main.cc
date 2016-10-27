@@ -31,7 +31,8 @@ int main(int argc, char *argv[]) {
   std::string subprogram("");
 
   ArgumentParser argparser;
-  argparser.AddArgument(&subprogram, VALUE_TYPE_STRING, "", "tool", "", "Specifies the tool to run:\n  align - the entire GraphMap pipeline.\n  owler - Overlapping With Long Erroneous Reads.", -1, "");
+  argparser.AddArgument(&subprogram, VALUE_TYPE_STRING, "", "tool", "",
+                        "Specifies the tool to run:\n  align - the entire GraphMap pipeline.\n  owler - Overlapping With Long Erroneous Reads.\n  daemon - Runs GraphMap as a daemon process, monitoring a specified folder.", -1, "");
   argparser.set_program_name(program_name);
 
   if (argc == 1) {
@@ -84,6 +85,32 @@ int main(int argc, char *argv[]) {
 
     Owler owler;
     owler.Run(program_parameters);
+
+  } else if (subprogram == "daemon") {
+    if (ProcessArgsDaemon(argc2, &argv2[0], &program_parameters))
+      return 1;
+
+    if (program_parameters.verbose_level == 1) {
+      LogSystem::GetInstance().LOG_VERBOSE_TYPE = LOG_VERBOSE_STD;
+    } else if (program_parameters.verbose_level > 1) {
+      LogSystem::GetInstance().LOG_VERBOSE_TYPE = LOG_VERBOSE_FULL | LOG_VERBOSE_STD;
+    }
+    fflush(stdout);
+
+    GraphMap graphmap;
+//    graphmap.Run(program_parameters);
+    clock_t time_start = clock();
+    graphmap.CheckParameters(program_parameters);
+    graphmap.Initialize(program_parameters, time_start);
+//    graphmap.RunOnFile(program_parameters, reads_file, out_sam_file, time_start);
+//    printf ("program_parameters.max_num_regions = %ld\n", program_parameters.max_num_regions);
+//    fflush(stdout);
+
+    bool is_dry_run = false;
+    std::string task_extension = "fastq";
+    Daemon::GetInstance().Run(program_parameters.daemon_in_path, program_parameters.daemon_out_path, task_extension, is_dry_run, &graphmap, program_parameters);
+
+
 
   } else {
     fprintf (stderr, "ERROR: Unknown value of 'tool' parameter. Exiting.\n\n");

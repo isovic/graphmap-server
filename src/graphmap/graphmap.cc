@@ -27,22 +27,42 @@ GraphMap::~GraphMap() {
   indexes_.clear();
 }
 
-void GraphMap::Initialize(ProgramParameters& parameters) {
-  clock_t time_start = clock();
-  clock_t last_time = time_start;
+void GraphMap::CheckParameters(const ProgramParameters& parameters) {
 
   // Set the verbose level for the execution of this program.
   LogSystem::GetInstance().SetProgramVerboseLevelFromInt(parameters.verbose_level);
 
+  if (parameters.is_reference_circular == false)
+    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("Reference genome is assumed to be linear.\n"), "Run");
+  else
+    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("Reference genome is assumed to be circular.\n"), "Run");
+
+  if (parameters.output_multiple_alignments == false)
+    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("Only one alignment will be reported per mapped read.\n"), "Run");
+  else
+    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("One or more similarly good alignments will be output per mapped read. Will be marked secondary.\n"), "Run");
+
+  if (parameters.outfmt != "sam" &&
+      parameters.outfmt != "afg" &&
+      parameters.outfmt != "m5" &&
+      parameters.outfmt != "mhap") {
+    LogSystem::GetInstance().Error(SEVERITY_INT_WARNING, __FUNCTION__, LogSystem::GetInstance().GenerateErrorMessage(ERR_WRONG_FILE_TYPE, "Unknown output format specified: '%s'. Defaulting to SAM output.", parameters.outfmt.c_str()));
+  }
+}
+
+void GraphMap::Initialize(ProgramParameters& parameters, const clock_t &time_start) {
+  clock_t last_time = time_start;
+
   // Check if the index exists, and build it if it doesn't.
   BuildIndex(parameters);
+
   LogSystem::GetInstance().Log(VERBOSE_LEVEL_HIGH | VERBOSE_LEVEL_MED, true, FormatString("Memory consumption: %s\n\n", FormatMemoryConsumptionAsString().c_str()), "Index");
   last_time = clock();
 
-  if (parameters.calc_only_index == true) {
-    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("Finished generating index. Note: only index was generated due to selected program arguments.\n\n", FormatMemoryConsumptionAsString().c_str()), "Index");
-    return;
-  }
+//  if (parameters.calc_only_index == true) {
+//    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("Finished generating index. Note: only index was generated due to selected program arguments.\n\n", FormatMemoryConsumptionAsString().c_str()), "Index");
+//    return;
+//  }
 
   // Dynamic calculation of the number of allowed regions. This should be relative to the genome size.
   // The following formula has been chosen arbitrarily.
@@ -73,38 +93,30 @@ void GraphMap::Initialize(ProgramParameters& parameters) {
   // we employ this simple heuristic.
   // The dynamic calculation can be overridden by explicitly stating the max_num_hits in the arguments passed to the binary.
   if (parameters.max_num_hits < 0) {
-    // This is how it was done previously.
-//    int64_t num_kmers = (1 << (parameters.k_region * 2));
-//    int64_t num_kmers_in_genome = (this->indexes_[0]->get_data_length_forward() * 2) - parameters.k_region + 1;
-//    double average_num_kmers = ((double) num_kmers_in_genome) / ((double) num_kmers);
-//    parameters.max_num_hits = (int64_t) ceil(average_num_kmers) * 500;
     int64_t max_seed_count = 0;
 //    ((IndexSpacedHashFast *) this->indexes_[0])->CalcPercentileHits(0.9999, &parameters.max_num_hits, &max_seed_count);
     ((IndexSpacedHashFast *) this->indexes_[0])->CalcPercentileHits(0.9999, &parameters.max_num_hits, &max_seed_count);
     LOG_ALL("Automatically setting the maximum number of seed hits to: %ld. Maximum seed occurrence in index: %ld.\n", parameters.max_num_hits, max_seed_count);
-
-//    LogSystem::GetInstance().VerboseLog(VERBOSE_LEVEL_ALL, true, FormatString("Automatically setting the maximum number of kmer hits: %ld\n", parameters.max_num_hits), "Run");
-//    ErrorReporting::GetInstance().VerboseLog(VERBOSE_LEVEL_ALL, true, FormatString("\tmax_num_hits = %ld\n", parameters.max_num_hits), "Run");
   } else if (parameters.max_num_hits == 0) {
     LOG_ALL("No limit to the maximum number of seed hits will be set in region selection.\n");
   }
+}
 
-  if (parameters.is_reference_circular == false)
-    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("Reference genome is assumed to be linear.\n"), "Run");
-  else
-    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("Reference genome is assumed to be circular.\n"), "Run");
+void GraphMap::RunOnFile(const ProgramParameters &parameters, std::string reads_file, std::string out_sam_path, const clock_t &time_start) {
+  ProgramParameters parameters_local = parameters;
+  parameters_local.reads_path = reads_file;
+  parameters_local.out_sam_path = out_sam_path;
 
-  if (parameters.output_multiple_alignments == false)
-    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("Only one alignment will be reported per mapped read.\n"), "Run");
-  else
-    LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("One or more similarly good alignments will be output per mapped read. Will be marked secondary.\n"), "Run");
+  clock_t last_time = clock();
+  FILE *fp_out = OpenOutSAMFile_(parameters_local.out_sam_path); // Checks if the output SAM file is specified. If it is not, then output to STDOUT.
 
-  if (parameters.outfmt != "sam" &&
-      parameters.outfmt != "afg" &&
-      parameters.outfmt != "m5" &&
-      parameters.outfmt != "mhap") {
-    LogSystem::GetInstance().Error(SEVERITY_INT_WARNING, __FUNCTION__, LogSystem::GetInstance().GenerateErrorMessage(ERR_WRONG_FILE_TYPE, "Unknown output format specified: '%s'. Defaulting to SAM output.", parameters.outfmt.c_str()));
-  }
+  // Do the actual work.
+  ProcessReadsFromSingleFile(parameters_local, fp_out);
+  LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("\n"), "[]");
+  LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, FormatString("All reads processed in %.2f sec (or %.2f CPU min).\n", (((float) (clock() - last_time))/CLOCKS_PER_SEC), ((((float) (clock() - last_time))/CLOCKS_PER_SEC) / 60.0f)), "ProcessReads");
+
+  if (fp_out != stdout)
+    fclose(fp_out);
 }
 
 void GraphMap::Run(ProgramParameters& parameters) {
@@ -321,7 +333,7 @@ int GraphMap::BuildIndex(ProgramParameters &parameters) {
   return 0;
 }
 
-void GraphMap::ProcessReadsFromSingleFile(ProgramParameters &parameters, FILE *fp_out) {
+void GraphMap::ProcessReadsFromSingleFile(const ProgramParameters &parameters, FILE *fp_out) {
   // Write out the SAM header in fp_out.
   if (parameters.outfmt == "sam") {
     std::string sam_header = GenerateSAMHeader_(parameters, indexes_[0]);
@@ -371,47 +383,49 @@ void GraphMap::ProcessReadsFromSingleFile(ProgramParameters &parameters, FILE *f
   reads.CloseFileAfterBatchLoading();
 }
 
-int GraphMap::ProcessSequenceFileInParallel(ProgramParameters *parameters, SequenceFile *reads, clock_t *last_time, FILE *fp_out, int64_t *ret_num_mapped, int64_t *ret_num_unmapped) {
+int GraphMap::ProcessSequenceFileInParallel(const ProgramParameters *parameters, SequenceFile *reads, clock_t *last_time, FILE *fp_out, int64_t *ret_num_mapped, int64_t *ret_num_unmapped) {
+  ProgramParameters parameters_local = *parameters;
+
   int64_t num_reads = reads->get_sequences().size();
   std::vector<std::string> sam_lines;
 
-  if (parameters->output_in_original_order == true) {
+  if (parameters_local.output_in_original_order == true) {
     sam_lines.resize(num_reads, std::string(""));
   }
 
   // Division by to to avoid hyperthreading cores, and limit on 24 to avoid clogging a shared SMP.
   int64_t num_threads = std::min(24, ((int) omp_get_num_procs()) / 2);
 
-  if (parameters->num_threads > 0)
-    num_threads = (int64_t) parameters->num_threads;
+  if (parameters_local.num_threads > 0)
+    num_threads = (int64_t) parameters_local.num_threads;
   LogSystem::GetInstance().Log(VERBOSE_LEVEL_HIGH | VERBOSE_LEVEL_MED, true, FormatString("Using %ld threads.\n", num_threads), "ProcessReads");
 
   // Set up the starting and ending read index.
-  int64_t start_i = (parameters->start_read >= 0)?((int64_t) parameters->start_read):0;
+  int64_t start_i = (parameters_local.start_read >= 0)?((int64_t) parameters_local.start_read):0;
 
   #ifndef RELEASE_VERSION
-    if (parameters->debug_read >= 0)
-      start_i = parameters->debug_read;
+    if (parameters_local.debug_read >= 0)
+      start_i = parameters_local.debug_read;
 
-    if (parameters->debug_read_by_qname != "") {
+    if (parameters_local.debug_read_by_qname != "") {
       for (int64_t i=0; i<num_reads; i++) {
-        if (std::string(reads->get_sequences().at(i)->get_header()).compare(0, parameters->debug_read_by_qname.size(), parameters->debug_read_by_qname) == 0) {
+        if (std::string(reads->get_sequences().at(i)->get_header()).compare(0, parameters_local.debug_read_by_qname.size(), parameters_local.debug_read_by_qname) == 0) {
           start_i = i;
-          parameters->debug_read = i;
+          parameters_local.debug_read = i;
           break;
         }
       }
     }
   #endif
 
-  int64_t max_i = (parameters->num_reads_to_process >= 0) ? (start_i + (int64_t) parameters->num_reads_to_process) : num_reads;
+  int64_t max_i = (parameters_local.num_reads_to_process >= 0) ? (start_i + (int64_t) parameters_local.num_reads_to_process) : num_reads;
 
   // Initialize the counters.
   int64_t num_mapped=0, num_unmapped=0, num_ambiguous=0, num_errors=0;
   int64_t num_reads_processed_in_thread_0 = 0;
 
   EValueParams *evalue_params;
-  SetupScorer((char *) "EDNA_FULL_5_4", indexes_[0]->get_data_length_forward(), -parameters->evalue_gap_open, -parameters->evalue_gap_extend, &evalue_params);
+  SetupScorer((char *) "EDNA_FULL_5_4", indexes_[0]->get_data_length_forward(), -parameters_local.evalue_gap_open, -parameters_local.evalue_gap_extend, &evalue_params);
 
   // Process all reads in parallel.
   #pragma omp parallel for num_threads(num_threads) firstprivate(num_reads_processed_in_thread_0, evalue_params) shared(reads, parameters, last_time, sam_lines, num_mapped, num_unmapped, num_ambiguous, num_errors, fp_out) schedule(dynamic, 1)
@@ -420,14 +434,14 @@ int GraphMap::ProcessSequenceFileInParallel(ProgramParameters *parameters, Seque
 
     // Verbose the currently processed read. If the verbose frequency is low, only output to STDOUT every 100th read.
     // If medium verbose frequency is set, every 10th read will be output, while for high every read will be reported.
-    if (thread_id == 0 && parameters->verbose_level > 0) {
+    if (thread_id == 0 && parameters_local.verbose_level > 0) {
       if (((!(LogSystem::GetInstance().PROGRAM_VERBOSE_LEVEL & VERBOSE_FREQ_ALL) ||
             (LogSystem::GetInstance().PROGRAM_VERBOSE_LEVEL & VERBOSE_FREQ_LOW)) && (num_reads_processed_in_thread_0 % 100) == 0) ||
           ((LogSystem::GetInstance().PROGRAM_VERBOSE_LEVEL & VERBOSE_FREQ_MED) && (num_reads_processed_in_thread_0 % 10) == 0) ||
           ((LogSystem::GetInstance().PROGRAM_VERBOSE_LEVEL & VERBOSE_FREQ_HIGH))) {
 
         std::stringstream ss;
-//        if (parameters->verbose_level > 6 && parameters->num_threads == 1)
+//        if (parameters_local.verbose_level > 6 && parameters_local.num_threads == 1)
 //              ss << "\n";
         ss << FormatString("\r[CPU time: %.2f sec, RSS: %ld MB] Read: %lu/%lu (%.2f%%) [m: %ld, u: %ld], length = %ld, qname: ",
                            (((float) (clock() - (*last_time)))/CLOCKS_PER_SEC), getCurrentRSS()/(1024*1024),
@@ -437,7 +451,7 @@ int GraphMap::ProcessSequenceFileInParallel(ProgramParameters *parameters, Seque
         std::string string_buffer = FormatStringToLength(ss.str(), 140);
         LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, string_buffer, "ProcessReads");
 
-        if (parameters->verbose_level > 6 && parameters->num_threads == 1)
+        if (parameters_local.verbose_level > 6 && parameters_local.num_threads == 1)
               ss << "\n";
       }
 
@@ -450,11 +464,11 @@ int GraphMap::ProcessSequenceFileInParallel(ProgramParameters *parameters, Seque
     // The actual interesting part.
     std::string sam_line = "";
     MappingData mapping_data;
-    ProcessRead(&mapping_data, indexes_, reads->get_sequences()[i], parameters, evalue_params);
+    ProcessRead(&mapping_data, indexes_, reads->get_sequences()[i], &parameters_local, evalue_params);
 
     // Generate the output.
     int mapped_state = STATE_UNMAPPED;
-    mapped_state = CollectAlignments(reads->get_sequences()[i], parameters, &mapping_data, sam_line);
+    mapped_state = CollectAlignments(reads->get_sequences()[i], &parameters_local, &mapping_data, sam_line);
 
     // Keep the counts.
     if (mapped_state == STATE_MAPPED) {
@@ -475,7 +489,7 @@ int GraphMap::ProcessSequenceFileInParallel(ProgramParameters *parameters, Seque
     }
 
     // If the order of the reads should be kept, store them in a vector, otherwise output the alignment to file.
-    if (parameters->output_in_original_order == false) {
+    if (parameters_local.output_in_original_order == false) {
       if (sam_line.size() > 0) {
         #pragma omp critical
         fprintf (fp_out, "%s\n", sam_line.c_str());
@@ -504,7 +518,7 @@ int GraphMap::ProcessSequenceFileInParallel(ProgramParameters *parameters, Seque
   LogSystem::GetInstance().Log(VERBOSE_LEVEL_ALL, true, "\n", "[]");
 
   // Output the results to the SAM file in the exact ordering of the input file (if it was requested by the specified parameter).
-  if (parameters->output_in_original_order == true) {
+  if (parameters_local.output_in_original_order == true) {
     for (int64_t i=0; i<num_reads; i++) {
       if (sam_lines[i].size() > 0) {
         fprintf (fp_out, "%s\n", sam_lines[i].c_str());
@@ -517,7 +531,7 @@ int GraphMap::ProcessSequenceFileInParallel(ProgramParameters *parameters, Seque
 
 
 
-std::string GraphMap::GenerateSAMHeader_(ProgramParameters &parameters, Index *index) {
+std::string GraphMap::GenerateSAMHeader_(const ProgramParameters &parameters, Index *index) {
   // Output reference sequence information.
   std::stringstream ss_header;
 

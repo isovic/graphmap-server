@@ -32,6 +32,10 @@
 #include <time.h>
 #include <vector>
 #include <dirent.h>
+#include <deque>
+#include "graphmap/graphmap.h"
+
+#include "semaphore.h"
 
 #define EVENT_SIZE          ( sizeof (struct inotify_event) )
 #define EVENT_BUF_LEN       ( 1024 * ( EVENT_SIZE + NAME_MAX + 1) )
@@ -48,9 +52,11 @@ class Daemon {
   ~Daemon();
   static Daemon& GetInstance();
 
-  void Run(std::string watch_folder, std::string output_folder, std::string processing_folder, std::string task_extension, bool is_dry_run);
+  void Run(std::string watch_folder, std::string output_folder, std::string task_extension, bool is_dry_run, GraphMap *graphmap, const ProgramParameters &parameters);
   bool is_run() const;
   void set_run(bool run);
+
+  friend void SigCallback(int sig);
 
  private:
   Daemon();
@@ -59,6 +65,7 @@ class Daemon {
 
   void RunNotifier_();
   void RunJobs_();
+  void ProcessSingleJob_(std::string &file_name);
   bool StringEndsWith_(std::string const &full_string, std::string const &ending);
   void ParseTaskFile_(std::string task_file_path);
   bool GetFileList_(std::string folder, std::vector<std::string> &ret_files);
@@ -72,8 +79,15 @@ class Daemon {
   std::string task_extension_;
   bool is_dry_run_;
 
-  std::list<std::string> files_to_process_;
+  std::deque<std::string> files_to_process_;
   bool run_;
+
+  std::unique_ptr<Semaphore> queue_sem_;
+  std::unique_ptr<Semaphore> active_sem_;
+  bool terminate_;
+
+  GraphMap *graphmap_;
+  ProgramParameters parameters_;
 };
 
 #endif /* DAEMON_H_ */

@@ -109,10 +109,16 @@ struct ProgramParameters {
 
   double max_error_rate = 1.0f;
   double max_indel_error_rate = 1.0f;
+
+  std::string daemon_in_path = "";
+  std::string daemon_out_path = "";
+  bool daemon_skip_existing = false;
+//  std::string daemon_done_path = "";
 };
 
 int ProcessArgsGraphMap(int argc, char **argv, ProgramParameters *parameters);
 int ProcessArgsOwler(int argc, char **argv, ProgramParameters *parameters);
+int ProcessArgsDaemon(int argc, char **argv, ProgramParameters *parameters);
 void VerboseProgramParameters(ProgramParameters *parameters);
 void VerboseShortHelpAndExit(int argc, char **argv);
 

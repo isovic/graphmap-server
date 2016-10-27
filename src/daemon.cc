@@ -11,6 +11,9 @@ Daemon::Daemon() {
   run_ = false;
   files_to_process_.clear();
   is_dry_run_ = false;
+  queue_sem_ = createSemaphore(1);
+  active_sem_ = createSemaphore(0);
+  terminate_ = false;
 }
 
 Daemon::~Daemon() {
@@ -23,18 +26,13 @@ Daemon& Daemon::GetInstance() {
 
 void SigCallback(int sig) {
   Daemon::GetInstance().set_run(false);
+  Daemon::GetInstance().terminate_ = true;
+  Daemon::GetInstance().active_sem_->post();
 }
 
-
-
-void Daemon::Run(std::string watch_folder, std::string output_folder, std::string processing_folder, std::string task_extension, bool is_dry_run) {
+void Daemon::Run(std::string watch_folder, std::string output_folder, std::string task_extension, bool is_dry_run, GraphMap *graphmap, const ProgramParameters &parameters) {
 
   struct stat st;
-  if(stat("./processtask.py", &st) != 0) {
-    fprintf (stderr, "ERROR: processtask.py script not found! Expected location: './processtask.py'. Exiting.\n");
-    fflush (stderr);
-    exit (1);
-  }
 
   if(stat(watch_folder.c_str() ,&st) != 0) {
     fprintf (stderr, "ERROR: Folder '%s' does not exist! Exiting.\n", watch_folder.c_str());
@@ -44,23 +42,34 @@ void Daemon::Run(std::string watch_folder, std::string output_folder, std::strin
 
   watch_folder_ = watch_folder;
   output_folder_ = output_folder;
-  processing_folder_ = processing_folder;
   is_dry_run_ = is_dry_run;
   task_extension_ = task_extension;
-//  command_line_ = command_line;
 
-  PopulateQueueFromFolder_(watch_folder_);
+  run_ = true;
+  terminate_ = false;
+  graphmap_ = graphmap;
+  parameters_ = parameters;
 
   // Handle the SIGINT callback.
   signal(SIGINT, SigCallback);
 
-  run_ = true;
+  if (parameters.daemon_skip_existing == false) {
+    PopulateQueueFromFolder_(watch_folder_);
+  }
+
+  if (files_to_process_.size() > 0) {
+    for (int32_t i=0; i<files_to_process_.size(); i++) {
+      active_sem_->post();
+    }
+    queue_sem_->post();
+  }
+
   // Run a separate thread for executing jobs on files.
-  std::thread thread_jobs(&Daemon::RunJobs_, this);
+  std::thread thread_job(&Daemon::RunJobs_, this);
   // Run the Inotifier process.
   RunNotifier_();
   // Join the threads.
-  thread_jobs.join();
+  thread_job.join();
 }
 
 void Daemon::PopulateQueueFromFolder_(std::string folder_path) {
@@ -68,20 +77,20 @@ void Daemon::PopulateQueueFromFolder_(std::string folder_path) {
   GetFileList_(folder_path, files);
 
   if (files.size() > 2) {
-    printf ("[PopulateQueueFromFolder_] Watch folder '%s' contains unprocessed files. Adding these files to queue:\n", folder_path.c_str());
-    fflush (stdout);
+    fprintf (stderr, "[PopulateQueueFromFolder_] Watch folder '%s' contains unprocessed files. Adding these files to queue:\n", folder_path.c_str());
+    fflush (stderr);
   }
 
   for (uint64_t i=0; i<files.size(); i++) {
     if (files[i] == "." || files[i] == "..")
       continue;
 
-    printf ("[PopulateQueueFromFolder_]  [%ld] %s\n", i, files[i].c_str());
-    fflush (stdout);
+    fprintf (stderr, "[PopulateQueueFromFolder_]  [%ld] %s\n", i, files[i].c_str());
+    fflush (stderr);
     files_to_process_.push_back(files[i]);
   }
-  printf ("\n");
-  fflush (stdout);
+  fprintf (stderr, "\n");
+  fflush (stderr);
 }
 
 void Daemon::RunNotifier_() {
@@ -114,8 +123,8 @@ void Daemon::RunNotifier_() {
   sigemptyset(&sa.sa_mask);
   sigaction(SIGINT, &sa, NULL);
 
-  printf ("[RunNotifier_] Running the INotify loop.\n");
-  fflush (stdout);
+  fprintf (stderr, "[RunNotifier_] Running the INotify loop.\n");
+  fflush (stderr);
 
   while (run_ == true) {
       // The command pselect waits on a file descriptor. Concretely, we wait intul one or more events
@@ -148,6 +157,7 @@ void Daemon::RunNotifier_() {
             fflush (stderr);
           }
 
+          bool add_event = false;
           std::string event_name_string = std::string(event->name);
 
           if ( event->len ) {
@@ -161,15 +171,17 @@ void Daemon::RunNotifier_() {
 
               } else if (event->mask & IN_MOVED_TO) {
                 if (!(event->mask & IN_ISDIR)) {
-                    files_to_process_.push_back(event_name_string);
-                  }
+                  add_event = true;
+//                    files_to_process_.push_back(event_name_string);
+                }
 
               } else if ( event->mask & IN_CLOSE_WRITE ) {
                 if (!(event->mask & IN_ISDIR)) {
                   FileMonitorType::iterator it = file_monitor.find(std::string(event_name_string));
                   if (it != file_monitor.end()) {
                     if ((it->second) > 0) {
-                      files_to_process_.push_back(event_name_string);
+                      add_event = true;
+//                      files_to_process_.push_back(event_name_string);
                     }
                   }
 
@@ -180,13 +192,19 @@ void Daemon::RunNotifier_() {
               }
           }
 
+          if (add_event) {
+            queue_sem_->wait();
+            files_to_process_.push_back(event_name_string);
+            queue_sem_->post();
+            active_sem_->post();
+          }
+
           i += EVENT_SIZE + event->len;
       }
   }
 
-  printf ("\n");
-  printf ("[GraphMapDaemon] Exited thread for monitoring file system operations.\n");
-  fflush (stdout);
+  fprintf (stderr, "\n");
+  fprintf (stderr, "[GraphMapDaemon] Exited thread for monitoring file system operations.\n");
   fflush (stderr);
 
   close(fd);
@@ -216,42 +234,42 @@ std::string Daemon::TrimString_(std::string &input_string) {
   return ret;
 }
 
-void Daemon::ParseTaskFile_(std::string task_file_path) {
-  std::string line = "";
-  std::ifstream task_file(task_file_path.c_str());
-  if (!task_file.is_open()) {
-    fprintf (stderr, "ERROR: Could not open file '%s' for reading!\n", task_file_path.c_str());
-    fflush (stderr);
-    return;
-  }
-
-  std::map<std::string, std::string> parameters;
-
-  while (getline(task_file, line)) {
-    std::size_t found = line.find(":");
-    if (found != std::string::npos) {
-      std::string param_name = line.substr(0, found);
-      std::string param_value = line.substr((found + 1));
-
-      param_name = TrimString_(param_name);
-      param_value = TrimString_(param_value);
-
-      parameters[param_name] = param_value;
-    }
-  }
-
-  task_file.close();
-
-  printf ("Parameters from file '%s':\n", task_file_path.c_str());
-  fflush (stdout);
-  std::map<std::string, std::string>::iterator it;
-  for (it=parameters.begin(); it!=parameters.end(); it++) {
-    printf ("'%s': '%s'\n", it->first.c_str(), it->second.c_str());
-    fflush (stdout);
-  }
-  printf ("\n");
-  fflush (stdout);
-}
+//void Daemon::ParseTaskFile_(std::string task_file_path) {
+//  std::string line = "";
+//  std::ifstream task_file(task_file_path.c_str());
+//  if (!task_file.is_open()) {
+//    fprintf (stderr, "ERROR: Could not open file '%s' for reading!\n", task_file_path.c_str());
+//    fflush (stderr);
+//    return;
+//  }
+//
+//  std::map<std::string, std::string> parameters;
+//
+//  while (getline(task_file, line)) {
+//    std::size_t found = line.find(":");
+//    if (found != std::string::npos) {
+//      std::string param_name = line.substr(0, found);
+//      std::string param_value = line.substr((found + 1));
+//
+//      param_name = TrimString_(param_name);
+//      param_value = TrimString_(param_value);
+//
+//      parameters[param_name] = param_value;
+//    }
+//  }
+//
+//  task_file.close();
+//
+//  fprintf (stderr, "Parameters from file '%s':\n", task_file_path.c_str());
+//  fflush (stderr);
+//  std::map<std::string, std::string>::iterator it;
+//  for (it=parameters.begin(); it!=parameters.end(); it++) {
+//    printf ("'%s': '%s'\n", it->first.c_str(), it->second.c_str());
+//    fflush (stdout);
+//  }
+//  printf ("\n");
+//  fflush (stdout);
+//}
 
 std::string Daemon::GetUTCTime_() {
   char outstr[200];
@@ -298,53 +316,60 @@ bool Daemon::GetFileList_(std::string folder, std::vector<std::string> &ret_file
 }
 
 void Daemon::RunJobs_() {
-  unsigned int microseconds = 50000;
   std::string valid_extension = task_extension_;
 
-  printf ("[RunJobs_] Thread for processing jobs initialized.\n");
-  fflush (stdout);
+  fprintf (stderr, "[RunJobs_] Thread for processing jobs initialized.\n");
+  fflush (stderr);
 
   while (run_ == true) {
-    usleep(microseconds);
+    active_sem_->wait();
 
-    while (files_to_process_.size()) {
-      std::string file_name = files_to_process_.front();
-      files_to_process_.pop_front();
+    if (terminate_ == true) {
+      break;
+    }
 
-      std::string output_file = "";
+    queue_sem_->wait();
 
-      if (StringEndsWith_(file_name, valid_extension)) {
-//        output_file = file_name.substr(0, file_name.size() - 4) + ext_sam;
-      }
-      else {
-        continue;
-      }
+    std::string file_name = files_to_process_.front();
+    files_to_process_.pop_front();
 
-//      std::string command = std::string("./graphmap ") + command_line_ + std::string(" -d ") + watch_folder_ + std::string("/") + file_name + std::string(" -o ") + output_folder_ + std::string("/") + output_file;
-      std::stringstream ss;
-//      ss << "Parsing task file '" << file_name << "'. Watch folder: '" << watch_folder_ << "', output folder: '" << output_folder_;
-//      ParseTaskFile_(watch_folder_ + "/" + file_name);
-      ss << "python processtask.py " << watch_folder_ << " " << output_folder_ << " " << processing_folder_ << " " << file_name;
-      printf ("[RunJobs_] %s, Command: '%s'.\n", file_name.c_str(), ss.str().c_str());
-      printf ("[RunJobs_] %s\n", GetUTCTime_().c_str());
-      fflush (stdout);
+    queue_sem_->post();
 
-      if (is_dry_run_ == false) {
-        int system_return_value = system(ss.str().c_str());
-        printf ("[RunJobs_] processtask.py returned with value %d.\n", system_return_value);
-        printf ("\n");
-        printf ("[RunJobs_] Finished processing job '%s'!\n", file_name.c_str());
-        printf ("[RunJobs_] %s\n", GetUTCTime_().c_str());
-        printf ("====================================================\n");
-        printf ("[RunJobs_] Waiting for the next job.\n");
-        fflush (stdout);
-      }
+    if (terminate_ == true) {
+      break;
+    }
+
+    if (StringEndsWith_(file_name, valid_extension)) {
+      ProcessSingleJob_(file_name);
     }
   }
 
-  printf ("[GraphMapDaemon] Exited thread for running jobs.\n");
-  fflush (stdout);
+  fprintf (stderr, "[GraphMapDaemon] Exited thread for running jobs.\n");
   fflush (stderr);
+}
+
+void Daemon::ProcessSingleJob_(std::string &file_name) {
+  std::string output_file = "";
+
+  std::stringstream ss;
+  ss << "Running job: " << watch_folder_ << " " << output_folder_ << " " << file_name;
+  fprintf (stderr, "[RunJobs_] %s\n", GetUTCTime_().c_str());
+  fflush (stderr);
+
+  if (is_dry_run_ == false) {
+    int system_return_value = 0;
+
+    clock_t time_start = clock();
+    std::string reads_file = watch_folder_ + "/" + file_name;
+    std::string sam_file = output_folder_ + "/" + file_name + ".sam";
+    graphmap_->RunOnFile(parameters_, reads_file, sam_file, time_start);
+
+    fprintf (stderr, "[RunJobs_] Finished processing job '%s'!\n", file_name.c_str());
+    fprintf (stderr, "[RunJobs_] %s\n", GetUTCTime_().c_str());
+    fprintf (stderr, "====================================================\n");
+    fprintf (stderr, "[RunJobs_] Waiting for the next job.\n");
+    fflush (stderr);
+  }
 }
 
 bool Daemon::is_run() const {
